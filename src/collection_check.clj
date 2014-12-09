@@ -27,6 +27,29 @@
 
 ;;;
 
+(defn- gen-list-actions [element-generator]
+  (gen/list
+    (gen/one-of
+      [(ttuple :rest)
+       (ttuple :map-id)
+       (ttuple :seq)
+       (ttuple :conj element-generator)])))
+
+(defn- add-list-actions [act-gen list-gen sort?]
+  (gen/one-of
+    [(gen/fmap
+       (fn [acts] {:actions acts :list-acts false})
+       act-gen)
+     (gen/fmap
+       (fn [[acts list-acts]]
+         {:actions (concat
+                     acts
+                     (when sort?
+                       [[[:seq]] [[:sort]]])
+                     list-acts)
+          :list-acts true})
+       (gen/tuple act-gen list-gen))]))
+
 (defn- gen-vector-actions [element-generator transient?]
   (let [standard [(ttuple :pop)
                   (ttuple :conj element-generator)
@@ -113,6 +136,10 @@
                   :conj! #(conj! % x)
                   :disj #(disj % x)
                   :disj! #(disj! % x)
+                  :rest rest
+                  :map-id #(map identity %)
+                  :seq seq
+                  :sort #(into (empty %) (sort %))
                   :assoc #(assoc % x y)
                   :assoc! #(assoc! % x y)
                   :dissoc #(dissoc % x)
@@ -130,13 +157,19 @@
 
 (defn assert-equivalent-collections
   [a b]
-  (assert (= (count a) (count b) (.size a) (.size b)))
-  (assert (= a b))
-  (assert (= b a))
-  (assert (.equals ^Object a b))
-  (assert (.equals ^Object b a))
-  (assert (= (hash a) (hash b)))
-  (assert (= (.hashCode ^Object a) (.hashCode ^Object b)))
+  (if (nil? a)
+    (assert (nil? b))
+    (do
+      (assert (= (count a) (count b) (.size a) (.size b)))
+      (assert (= a b))
+      (assert (= b a))
+      (assert (.equals ^Object a b))
+      (assert (.equals ^Object b a))
+      (assert (= (hash a) (hash b)))
+      (assert (= (.hashCode ^Object a) (.hashCode ^Object b))))))
+
+(defn assert-into
+  [a b]
   (assert (= a b
             (into (empty a) a)
             (into (empty b) b)
@@ -149,9 +182,7 @@
                (reduce #(reduced* (conj %1 %2)) (empty b) b)))))
 
 (defn assert-equivalent-vectors [a b]
-  (assert-equivalent-collections a b)
-  (assert (= (map identity (next a))
-             (map identity (next b))))
+  (assert-into a b)
   (assert (= (first a) (first b)))
   (assert (= (map #(nth a %) (range (count a)))
             (map #(nth b %) (range (count b)))))
@@ -164,7 +195,7 @@
   (assert (= 0 (compare a b))))
 
 (defn assert-equivalent-sets [a b]
-  (assert-equivalent-collections a b)
+  (assert-into a b)
   (assert (= (set (map #(a %) a))
             (set (map #(b %) b))))
   (assert (and
@@ -172,7 +203,7 @@
             (every? #(contains? b %) a))))
 
 (defn assert-equivalent-maps [a b]
-  (assert-equivalent-collections a b)
+  (assert-into a b)
   (assert (= (set (keys a)) (set (keys b))))
   (let [ks (keys a)]
     (assert (= (map #(get a %) ks)
@@ -190,7 +221,7 @@
 
 (defn- assert-not-failed [x]
   (if (:fail x)
-    (let [[actions] (-> x :shrunk :smallest)]
+    (let [[{:keys [actions]}] (-> x :shrunk :smallest)]
       (throw (Exception.
                (str (.getMessage ^Throwable (:result x))
                  "\n  actions = " (->> actions
@@ -211,9 +242,14 @@
   ([n empty-coll element-generator]
      (assert-not-failed
        (quick-check n
-         (prop/for-all [actions (gen-vector-actions element-generator (transient? empty-coll))]
-           (let [[a b actions] (build-collections empty-coll [] true actions)]
-             (assert-equivalent-vectors a b)
+         (prop/for-all [actions (add-list-actions
+                                  (gen-vector-actions element-generator (transient? empty-coll))
+                                  (gen-list-actions element-generator) false)]
+           (let [{:keys [actions list-acts]} actions
+                 [a b actions] (build-collections empty-coll [] true actions)]
+             (assert-equivalent-collections a b)
+             (when-not list-acts
+               (assert-equivalent-vectors a b))
              true))))))
 
 (defn assert-set-like
@@ -222,9 +258,14 @@
   ([n empty-coll element-generator]
      (assert-not-failed
        (quick-check n
-         (prop/for-all [actions (gen-set-actions element-generator (transient? empty-coll))]
-           (let [[a b actions] (build-collections empty-coll #{} false actions)]
-             (assert-equivalent-sets a b)
+         (prop/for-all [actions (add-list-actions
+                                  (gen-set-actions element-generator (transient? empty-coll))
+                                  (gen-list-actions element-generator) true)]
+           (let [{:keys [actions list-acts]} actions
+                 [a b actions] (build-collections empty-coll #{} false actions)]
+             (assert-equivalent-collections a b)
+             (when-not list-acts
+               (assert-equivalent-sets a b))
              true))))))
 
 (defn assert-map-like
@@ -233,7 +274,12 @@
   ([n empty-coll key-generator value-generator]
      (assert-not-failed
        (quick-check n
-         (prop/for-all [actions (gen-map-actions key-generator value-generator (transient? empty-coll))]
-           (let [[a b actions] (build-collections empty-coll {} false actions)]
-             (assert-equivalent-maps a b)
+         (prop/for-all [actions (add-list-actions
+                                  (gen-map-actions key-generator value-generator (transient? empty-coll))
+                                  (gen-list-actions (gen/tuple key-generator value-generator)) true)]
+           (let [{:keys [actions list-acts]} actions
+                 [a b actions] (build-collections empty-coll {} false actions)]
+             (assert-equivalent-collections a b)
+             (when-not list-acts
+               (assert-equivalent-maps a b))
              true))))))
